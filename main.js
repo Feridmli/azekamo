@@ -11,7 +11,7 @@ import { Seaport } from "@opensea/seaport-js";
 const BACKEND_URL =
   import.meta.env.VITE_BACKEND_URL ||
   window?.__BACKEND_URL__ ||
-  "https://azekamo.onrender.com";
+  "https://azekamo10.onrender.com";
 
 const NFT_CONTRACT_ADDRESS =
   import.meta.env.VITE_NFT_CONTRACT ||
@@ -278,7 +278,7 @@ async function buyNFT(nftRecord) {
 
     const tx = await action.transactionMethods.transact({
       value: totalValue,    // Hesabladığımız dəqiq məbləğ
-      gasLimit: 500000      // Execution Reverted olmaması üçün ehtiyat Gas
+      gasLimit: 2000000      // Execution Reverted olmaması üçün ehtiyat Gas
     });
 
     notify("Transaction göndərildi, gözləyin...");
