@@ -11,7 +11,7 @@ import { Seaport } from "@opensea/seaport-js";
 const BACKEND_URL =
   import.meta.env.VITE_BACKEND_URL ||
   window?.__BACKEND_URL__ ||
-  "https://azekamo10.onrender.com";
+  "https://azekamo20.onrender.com";
 
 const NFT_CONTRACT_ADDRESS =
   import.meta.env.VITE_NFT_CONTRACT ||
@@ -82,12 +82,13 @@ async function connectWallet() {
   try {
     if (!window.ethereum) return alert("Metamask tapılmadı!");
     
-    // Chain dəyişikliyi xətalarını önləmək üçün 'any'
+    // Chain dəyişəndə error verməməsi üçün 'any'
     provider = new ethers.providers.Web3Provider(window.ethereum, "any");
     
     await provider.send("eth_requestAccounts", []);
     const network = await provider.getNetwork();
 
+    // ApeChain Check
     if (network.chainId !== APECHAIN_ID) {
       try {
         await window.ethereum.request({
@@ -113,7 +114,7 @@ async function connectWallet() {
     signer = provider.getSigner();
     userAddress = (await signer.getAddress()).toLowerCase();
 
-    // Seaport Setup
+    // Seaport Init
     seaport = new Seaport(signer, { overrides: { contractAddress: SEAPORT_CONTRACT_ADDRESS } });
     
     connectBtn.style.display = "none";
@@ -222,7 +223,7 @@ window.addEventListener("scroll", () => {
 });
 
 // ==========================================
-// BUY FUNCTION (FIXED & DEBUGGED)
+// BUY FUNCTION (SMART GAS & APPROVAL CHECK)
 // ==========================================
 
 async function buyNFT(nftRecord) {
@@ -231,13 +232,13 @@ async function buyNFT(nftRecord) {
   try {
     const buyerAddress = await signer.getAddress();
     
-    // 1. Öz-özünə alışı yoxla
+    // 1. Öz-özünə satışın qarşısını al
     if (nftRecord.seller_address && nftRecord.seller_address.toLowerCase() === buyerAddress.toLowerCase()) {
         return alert("Öz satışa qoyduğunuz NFT-ni ala bilməzsiniz.");
     }
     
     if (!nftRecord.price || parseFloat(nftRecord.price) <= 0) {
-        return alert("Bu NFT satışda deyil.");
+      return alert("Bu NFT satışda deyil.");
     }
 
     notify("Order yoxlanılır...");
@@ -251,16 +252,14 @@ async function buyNFT(nftRecord) {
     if (rawOrder && rawOrder.order) rawOrder = rawOrder.order;
 
     if (!rawOrder || !rawOrder.parameters || !rawOrder.signature) {
-      console.error("Invalid Order:", rawOrder);
-      return alert("Satış məlumatları xətalıdır (Signature missing).");
+      return alert("Satış məlumatları natamamdır (Signature missing).");
     }
 
     // ======================================================
-    // 3. KRİTİK CHECK: Satıcının İcazəsi (Approval) Varmı?
+    // 3. CHECK: Satıcının İcazəsi (Approval)
     // ======================================================
     const sellerFromOrder = rawOrder.parameters.offerer;
     
-    // NFT Contract-ı sadə şəkildə oxumaq üçün
     const nftReadContract = new ethers.Contract(
         NFT_CONTRACT_ADDRESS,
         ["function isApprovedForAll(address, address) view returns (bool)"],
@@ -271,11 +270,11 @@ async function buyNFT(nftRecord) {
     
     if (!isApproved) {
         console.error(`Satıcı (${sellerFromOrder}) Seaport üçün approval verməyib.`);
-        return alert(`XƏTA: NFT sahibi (${sellerFromOrder.slice(0,6)}...) satış icazəsini (Approval) ləğv edib. Bu NFT-ni almaq mümkün deyil.`);
+        return alert(`XƏTA: NFT sahibi (${sellerFromOrder.slice(0,6)}...) satış icazəsini ləğv edib.`);
     }
 
     // ======================================================
-    // 4. Fulfillment & Simulation
+    // 4. Fulfillment & Gas Estimation
     // ======================================================
     notify("Tranzaksiya hazırlanır...");
 
@@ -285,48 +284,63 @@ async function buyNFT(nftRecord) {
     });
 
     if (!actions || actions.length === 0) {
-      throw new Error("Seaport order ləğv edilib və ya keçərsizdir.");
+      throw new Error("Seaport heç bir əməliyyat qaytarmadı.");
     }
 
     const action = actions[0];
     const txRequest = await action.transactionMethods.buildTransaction();
 
-    // --- Simulyasiya ---
+    // 5. Simulyasiya (Revert Check)
     try {
         await provider.call({
             ...txRequest,
             from: buyerAddress,
-            gasLimit: 6000000
+            gasLimit: 6000000 // Yalnız simulyasiya üçün yüksək limit
         });
         console.log("Simulyasiya Uğurlu ✅");
     } catch (simError) {
         console.warn("Simulyasiya Xətası:", simError);
-        const reason = simError.reason || simError.message || "Səbəb bilinmir";
-        
-        // İstifadəçiyə seçim veririk
         const proceed = confirm(
-            `Simulyasiya zamanı xəbərdarlıq: ${reason}\n\n` +
-            "Bu xəta RPC gecikməsindən ola bilər. Yenə də tranzaksiyanı göndərmək istəyirsiniz?"
+             "DİQQƏT: Simulyasiya xəta verdi (RPC gecikməsi ola bilər).\n\n" + 
+             "Yenə də almaq istəyirsiniz?"
         );
         if (!proceed) return notify("Əməliyyat ləğv edildi.");
     }
 
+    notify("Gas hesablanır...");
+
+    // 6. Smart Gas Estimation
+    let estimatedGas;
+    try {
+        const gasEstimate = await signer.estimateGas({
+            to: txRequest.to,
+            data: txRequest.data,
+            value: txRequest.value
+        });
+        // 20% ehtiyat (Buffer)
+        estimatedGas = gasEstimate.mul(120).div(100); 
+    } catch (error) {
+        console.warn("Gas estimate failed, using Safe Limit");
+        // Hesablama alınmasa, təhlükəsiz limit (500k)
+        estimatedGas = ethers.BigNumber.from("500000"); 
+    }
+
     notify("Cüzdanda təsdiqləyin...");
 
-    // 5. Transaction Göndərmə
+    // 7. Transaction Send (Dynamic Gas)
     const tx = await signer.sendTransaction({
       to: txRequest.to,
       data: txRequest.data,
       value: txRequest.value,
-      gasLimit: 7000000 // Revert olmaması üçün artırılmış Gas Limit
+      gasLimit: estimatedGas
     });
 
-    notify("Transaction göndərildi... ⏳");
+    notify("Transaction göndərildi, gözləyin...");
     await tx.wait();
     
     notify("NFT uğurla alındı! 🎉");
     
-    // 6. Backend Update
+    // 8. Backend Update
     const postPrice = nftRecord.price ? parseFloat(nftRecord.price) : 0;
     
     await fetch(`${BACKEND_URL}/api/buy`, {
@@ -343,6 +357,7 @@ async function buyNFT(nftRecord) {
       }),
     });
 
+    // 9. UI Yenilə
     setTimeout(() => { 
       loadedCount = 0; 
       allNFTs = []; 
@@ -358,7 +373,7 @@ async function buyNFT(nftRecord) {
 }
 
 // ==========================================
-// LIST FUNCTION (FIXED: Chain ID Check)
+// LIST FUNCTION (TIMESTAMP FIX: -5 MIN)
 // ==========================================
 
 async function listNFT(tokenid, priceWei, card) {
@@ -366,7 +381,7 @@ async function listNFT(tokenid, priceWei, card) {
   if (!tokenid) return alert("Token ID boşdur!");
 
   try {
-    // 1. Şəbəkə Yoxlanışı (Vacib)
+    // 1. Chain Check
     const network = await provider.getNetwork();
     if (network.chainId !== APECHAIN_ID) {
         return alert("Səhv şəbəkə! Zəhmət olmasa ApeChain-ə qoşulun.");
@@ -375,7 +390,7 @@ async function listNFT(tokenid, priceWei, card) {
     const seller = await signer.getAddress();
     const tokenStr = tokenid.toString();
 
-    // 2. Sahiblik və İcazə Yoxlanışı
+    // 2. Ownership & Approval Check
     const nftContract = new ethers.Contract(
       NFT_CONTRACT_ADDRESS,
       ["function ownerOf(uint256) view returns (address)", "function isApprovedForAll(address,address) view returns(bool)", "function setApprovalForAll(address,bool)"],
@@ -389,9 +404,8 @@ async function listNFT(tokenid, priceWei, card) {
     if (!approved) {
       notify("Marketplace üçün icazə verilir (Approve)...");
       const tx = await nftContract.setApprovalForAll(SEAPORT_CONTRACT_ADDRESS, true);
-      notify("Approve gözlənilir...");
       await tx.wait();
-      notify("Approve təsdiqləndi!");
+      notify("İcazə verildi.");
     }
 
     notify("Satış imzası yaradılır...");
@@ -404,24 +418,25 @@ async function listNFT(tokenid, priceWei, card) {
         identifier: tokenStr 
       }],
       consideration: [{ 
-        itemType: 0, // Native Token (APE)
+        itemType: 0, // Native APE
         token: ZERO_ADDRESS, 
         identifier: "0", 
         amount: priceWei.toString(), 
         recipient: seller 
       }],
-      startTime: (Math.floor(Date.now() / 1000)).toString(),
-      endTime: (Math.floor(Date.now() / 1000) + 30 * 86400).toString(), // 30 Gün
+      // *** TIMESTAMP FIX: 5 Dəqiqə Geriyə ***
+      startTime: (Math.floor(Date.now() / 1000) - 300).toString(),
+      endTime: (Math.floor(Date.now() / 1000) + 30 * 86400).toString(),
       
-      conduitKey: ZERO_BYTES32, // Direct execution
+      conduitKey: ZERO_BYTES32, // Direct
       zone: ZERO_ADDRESS,
       zoneHash: ZERO_BYTES32,
       restrictedByZone: false,
-      salt: ethers.BigNumber.from(ethers.utils.randomBytes(32)).toString() // Unikal Salt
+      salt: ethers.BigNumber.from(ethers.utils.randomBytes(32)).toString()
     };
 
     const create = await seaport.createOrder(orderInput, seller);
-    if (!create || !create.executeAllActions) throw new Error("Seaport order yarada bilmədi");
+    if (!create || !create.executeAllActions) throw new Error("Seaport order xətası");
     
     const signedOrder = await create.executeAllActions();
     const orderHash = seaport.getOrderHash(signedOrder.parameters);
@@ -461,7 +476,6 @@ async function listNFT(tokenid, priceWei, card) {
   }
 }
 
-// Funksiyaları qlobala atırıq
 window.connectWallet = connectWallet;
 window.buyNFT = buyNFT;
 window.listNFT = listNFT;
